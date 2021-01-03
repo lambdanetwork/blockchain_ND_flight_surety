@@ -11,22 +11,86 @@ contract FlightSuretyData {
 
     address private contractOwner;                                      // Account used to deploy contract
     bool private operational = true;                                    // Blocks all state changes throughout the contract if false
+    mapping(address => bool) private authorizedCallers; // Addresses that can access this contract
+
+    // data structure to determine an airline
+    struct Airline {
+        address airlineAccount; // account address of airline
+        string name; // name of airline
+        bool isRegistered; // is this airline registered or not
+        bool isFunded; // is this airline funded or not
+        uint256 fund; // amount of fund available
+    }
+    // mapping to store airlines data
+    mapping(address => Airline) private airlines;
+    // number of airlines available
+    uint256 internal airlinesCount = 0;
+
+    // data structure to determine insurance
+    struct Insurance {
+        address payable insureeAccount; // account address of insuree
+        uint256 amount; // insurance amount
+        address airlineAccount; // account address of airline
+        string airlineName; // name of airline
+        uint256 timestamp; // timestamp of airline
+    }
+    // mapping to store insurances data
+    mapping(bytes32 => Insurance[]) private insurances;
+    // mapping to indicate flights whose payout have been credited
+    mapping(bytes32 => bool) private payoutCredited;
+    // mapping to store credits available for each insuree
+    mapping(address => uint256) private creditPayoutsToInsuree;
 
     /********************************************************************************************/
     /*                                       EVENT DEFINITIONS                                  */
     /********************************************************************************************/
 
+    // event to trigger when airline gets registered
+    event AirlineRegistered(
+        address indexed airlineAccount, // account address of airline
+        string airlineName // name of airline
+    );
+    // event to trigger when airline gets funded
+    event AirlineFunded(
+        address indexed airlineAccount, // account address of airline
+        uint256 amount // amount funded to airline
+    );
+    // event to trigger when insurance is purchased
+    event InsurancePurchased(
+        address indexed insureeAccount, // account address of insuree
+        uint256 amount, // insurance amount
+        address airlineAccount, // account address of airline
+        string airlineName, // name of airline
+        uint256 timestamp // timestamp of airline
+    );
+    // event to trigger when insurance credit is available
+    event InsuranceCreditAvailable(
+        address indexed airlineAccount, // account address of airline
+        string indexed airlineName, // name of airline
+        uint256 indexed timestamp // timestamp of airline
+    );
+    // event to trigger when insurance is credited
+    event InsuranceCredited(
+        address indexed insureeAccount, // account address of insuree
+        uint256 amount // insurance amount
+    );
+    // event to trigger when insurance is paid
+    event InsurancePaid(
+        address indexed insureeAccount, // account address of insuree
+        uint256 amount // insurance amount
+    );
 
     /**
-    * @dev Constructor
-    *      The deploying account becomes contractOwner
-    */
-    constructor
-                                (
-                                ) 
-                                public 
-    {
+     * @dev Constructor
+     *      The deploying account becomes contractOwner
+     */
+    constructor(
+        address initialAirline,
+        string memory initialFlight
+    )
+    public {
         contractOwner = msg.sender;
+        addAirline(initialAirline, initialFlight);
     }
 
     /********************************************************************************************/
@@ -48,6 +112,15 @@ contract FlightSuretyData {
     }
 
     /**
+     * @dev Modifier that requires the caller address either be registered as "authorized" or be the owner of the contract.
+     *      This is used to avoid that other accounts may alter this data contract.
+     */
+    modifier requireIsCallerAuthorized() {
+        require(authorizedCallers[msg.sender] == true || msg.sender == contractOwner, "Caller is not authorized");
+        _;
+    }
+
+    /**
     * @dev Modifier that requires the "ContractOwner" account to be the function caller
     */
     modifier requireContractOwner()
@@ -56,9 +129,41 @@ contract FlightSuretyData {
         _;
     }
 
+    /**
+     * @dev Modifier that requires an airline account to be the function caller
+     */
+    modifier requireIsAirline() {
+        require(airlines[msg.sender].isRegistered == true, "Caller is not airline");
+        _;
+    }
+
+    /**
+     * @dev Modifier that requires an airline account to be funded
+     */
+    modifier requireIsAirlineFunded(address _airlineAccount) {
+        require(airlines[_airlineAccount].isFunded == true, "Airline is not funded");
+        _;
+    }
+
+    /**
+     * @dev Modifier that requires message data to be filled
+     */
+    modifier requireMsgData() {
+        require(msg.data.length > 0, "Message data is empty");
+        _;
+    }
+
     /********************************************************************************************/
     /*                                       UTILITY FUNCTIONS                                  */
     /********************************************************************************************/
+
+    /**
+     * @dev Add a new address to the list of authorized callers
+     *      Can only be called by the contract owner
+     */
+    function authorizeCaller(address contractAddress) external requireContractOwner {
+        authorizedCallers[contractAddress] = true;
+    }
 
     /**
     * @dev Get operating status of contract
@@ -66,7 +171,7 @@ contract FlightSuretyData {
     * @return A bool that is the current operating status
     */      
     function isOperational() 
-                            public 
+                            external 
                             view 
                             returns(bool) 
     {
@@ -99,88 +204,234 @@ contract FlightSuretyData {
     *
     */   
     function registerAirline
-                            (   
-                            )
-                            external
-                            pure
-    {
+        address airline,
+        string calldata flight
+    )
+    external
+    requireIsCallerAuthorized {
+        addAirline(airline, flight);
     }
 
+    function addAirline(
+        address airline,
+        string memory flight
+    )
+    private {
+        airlinesCount = airlinesCount.add(1);
+        airlines[airline] = Airline(
+            airline,
+            flight,
+            true,
+            false,
+            0
+        );
+        emit AirlineRegistered(airline, flight);
+    }
 
-   /**
-    * @dev Buy insurance for a flight
-    *
-    */   
-    function buy
-                            (                             
-                            )
-                            external
-                            payable
-    {
-
+    /**
+     * @dev Buy insurance for a flight
+     *
+     */
+    function buy(
+        address payable insureeAccount,
+        address airline,
+        string calldata flight,
+        uint256 timestamp
+    )
+    external
+    payable {
+        bytes32 flightKey = getFlightKey(airline, flight, timestamp);
+        airlines[airline].fund = airlines[airline].fund.add(msg.value);
+        insurances[flightKey].push(
+            Insurance(
+                insureeAccount,
+                msg.value,
+                airline,
+                flight,
+                timestamp
+            )
+        );
+        emit InsurancePurchased(
+            insureeAccount,
+            msg.value,
+            airline,
+            flight,
+            timestamp
+        );
     }
 
     /**
      *  @dev Credits payouts to insurees
-    */
-    function creditInsurees
-                                (
-                                )
-                                external
-                                pure
-    {
+     */
+    function creditInsurees(
+        uint256 _creditPercentage,
+        address _airlineAccount,
+        string calldata _airlineName,
+        uint256 _timestamp
+    ) external
+    requireIsCallerAuthorized {
+        bytes32 flightKey = getFlightKey(_airlineAccount, _airlineName, _timestamp);
+        require(!payoutCredited[flightKey], "Insurance payout have already been credited");
+        for (uint i = 0; i < insurances[flightKey].length; i++) {
+            address insureeAccount = insurances[flightKey][i].insureeAccount;
+            uint256 amountToReceive = insurances[flightKey][i].amount.mul(_creditPercentage).div(100);
+            creditPayoutsToInsuree[insureeAccount] = creditPayoutsToInsuree[insureeAccount].add(amountToReceive);
+            airlines[_airlineAccount].fund = airlines[_airlineAccount].fund.sub(amountToReceive);
+            emit InsuranceCredited(insureeAccount, amountToReceive);
+        }
+        payoutCredited[flightKey] = true;
+        emit InsuranceCreditAvailable(_airlineAccount, _airlineName, _timestamp);
     }
-    
 
     /**
      *  @dev Transfers eligible payout funds to insuree
      *
-    */
-    function pay
-                            (
-                            )
-                            external
-                            pure
-    {
+     */
+    function pay(
+        address payable _insureeAccount
+    )
+    external
+    requireIsCallerAuthorized {
+        uint256 payableAmount = creditPayoutsToInsuree[_insureeAccount];
+        delete(creditPayoutsToInsuree[_insureeAccount]);
+        _insureeAccount.transfer(payableAmount);
+        emit InsurancePaid(_insureeAccount, payableAmount);
     }
 
-   /**
-    * @dev Initial funding for the insurance. Unless there are too many delayed flights
-    *      resulting in insurance payouts, the contract should be self-sustaining
-    *
-    */   
-    function fund
-                            (   
-                            )
-                            public
-                            payable
-    {
+    /**
+     * @dev Initial funding for the insurance. Unless there are too many delayed flights
+     *      resulting in insurance payouts, the contract should be self-sustaining
+     *
+     */
+    function fund(
+        address airline
+    )
+    external
+    payable
+    requireIsCallerAuthorized {
+        addFund(airline, msg.value);
+        airlines[airline].isFunded = true;
+        emit AirlineFunded(airline, msg.value);
     }
 
-    function getFlightKey
-                        (
-                            address airline,
-                            string memory flight,
-                            uint256 timestamp
-                        )
-                        pure
-                        internal
-                        returns(bytes32) 
-    {
+    function addFund(
+        address airline,
+        uint256 value
+    )
+    private {
+        airlines[airline].fund = airlines[airline].fund.add(value);
+    }
+
+    function getFlightKey(
+        address airline,
+        string memory flight,
+        uint256 timestamp
+    )
+    pure
+    internal
+    returns(bytes32) {
         return keccak256(abi.encodePacked(airline, flight, timestamp));
     }
 
     /**
-    * @dev Fallback function for funding smart contract.
-    *
-    */
-    function() 
-                            external 
-                            payable 
-    {
-        fund();
+     *  @dev check if address is of airline or not
+     *
+     */
+    function isAirline(
+        address airlineAccount
+    )
+    external
+    view
+    returns(bool) {
+        return airlines[airlineAccount].isRegistered == true;
     }
 
+    /**
+     *  @dev check if address is of airline or not
+     *
+     */
+    function isAirlineFunded(
+        address airlineAccount
+    )
+    external
+    view
+    requireIsCallerAuthorized
+    returns(bool) {
+        return airlines[airlineAccount].isFunded == true;
+    }
+
+    /**
+     * @dev get fund of airline
+     */
+    function getFund(
+        address airlineAccount
+    ) 
+    external
+    view
+    requireIsCallerAuthorized
+    returns(uint256) {
+        return airlines[airlineAccount].fund;
+    }
+
+    /**
+     *  @dev check if address is of airline or not
+     *
+     */
+    function getAirlinesCount()
+    external
+    view
+    returns(uint256) {
+        return airlinesCount;
+    }
+
+    /**
+     *  @dev get amount paid by insuree
+     *
+     */
+    function getAmountPaidByInsuree(
+        address payable _insureeAccount,
+        address _airlineAccount,
+        string calldata _airlineName,
+        uint256 _timestamp
+    ) 
+    external
+    view
+    returns(uint256 amountPaid) {
+        amountPaid = 0;
+        bytes32 flightKey = getFlightKey(_airlineAccount, _airlineName, _timestamp);
+        for (uint i = 0; i < insurances[flightKey].length; i++) {
+            if (insurances[flightKey][i].insureeAccount == _insureeAccount) {
+                amountPaid = insurances[flightKey][i].amount;
+                break;
+            }
+        }
+    }
+
+    /**
+     *  @dev Returns insurees credits
+     *
+     */
+    function getInsureePayoutCredits(
+        address payable _insureeAccount
+    ) 
+    external
+    view
+    returns(uint256 amount) {
+        return creditPayoutsToInsuree[_insureeAccount];
+    }
+
+    /**
+     * @dev Fallback function for funding smart contract.
+     *
+     */
+    function ()
+    external
+    payable
+    requireMsgData
+    requireIsAirline {
+        addFund(msg.sender, msg.value);
+        airlines[msg.sender].isFunded = true;
+        emit AirlineFunded(msg.sender, msg.value);
+    }
 
 }
-
